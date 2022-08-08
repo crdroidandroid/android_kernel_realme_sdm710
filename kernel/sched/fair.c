@@ -2656,7 +2656,7 @@ void task_tick_numa(struct rq *rq, struct task_struct *curr)
 	/*
 	 * We don't care about NUMA placement if we don't have memory.
 	 */
-	if (!curr->mm || (curr->flags & PF_EXITING) || work->next != work)
+	if ((curr->flags & (PF_EXITING | PF_KTHREAD)) || work->next != work)
 		return;
 
 	/*
@@ -4350,8 +4350,8 @@ static void throttle_cfs_rq(struct cfs_rq *cfs_rq)
 		qcfs_rq->h_nr_running -= task_delta;
 		walt_dec_throttled_cfs_rq_stats(&qcfs_rq->walt_stats, cfs_rq);
 		walt_propagate_cumulative_runnable_avg(
-				   &qcfs_rq->cumulative_runnable_avg,
-				   cfs_rq->cumulative_runnable_avg, false);
+				   &qcfs_rq->walt_stats.cumulative_runnable_avg,
+				   cfs_rq->walt_stats.cumulative_runnable_avg, false);
 
 		if (qcfs_rq->load.weight)
 			dequeue = 0;
@@ -4361,8 +4361,8 @@ static void throttle_cfs_rq(struct cfs_rq *cfs_rq)
 		sub_nr_running(rq, task_delta);
 		walt_dec_throttled_cfs_rq_stats(&rq->walt_stats, cfs_rq);
 		walt_propagate_cumulative_runnable_avg(
-				   &rq->cumulative_runnable_avg,
-				   cfs_rq->cumulative_runnable_avg, false);
+				   &rq->walt_stats.cumulative_runnable_avg,
+				   cfs_rq->walt_stats.cumulative_runnable_avg, false);
 	}
 
 	cfs_rq->throttled = 1;
@@ -4427,8 +4427,8 @@ void unthrottle_cfs_rq(struct cfs_rq *cfs_rq)
 		cfs_rq->h_nr_running += task_delta;
 		walt_inc_throttled_cfs_rq_stats(&cfs_rq->walt_stats, tcfs_rq);
 		walt_propagate_cumulative_runnable_avg(
-				   &cfs_rq->cumulative_runnable_avg,
-				   tcfs_rq->cumulative_runnable_avg, true);
+				   &cfs_rq->walt_stats.cumulative_runnable_avg,
+				   tcfs_rq->walt_stats.cumulative_runnable_avg, true);
 
 		if (cfs_rq_throttled(cfs_rq))
 			break;
@@ -4438,8 +4438,8 @@ void unthrottle_cfs_rq(struct cfs_rq *cfs_rq)
 		add_nr_running(rq, task_delta);
 		walt_inc_throttled_cfs_rq_stats(&rq->walt_stats, tcfs_rq);
 		walt_propagate_cumulative_runnable_avg(
-				   &rq->cumulative_runnable_avg,
-				   tcfs_rq->cumulative_runnable_avg, true);
+				   &rq->walt_stats.cumulative_runnable_avg,
+				   tcfs_rq->walt_stats.cumulative_runnable_avg, true);
 	}
 
 	/* determine whether we need to wake up potentially idle cpu */
@@ -4580,7 +4580,7 @@ static const u64 cfs_bandwidth_slack_period = 5 * NSEC_PER_MSEC;
 static int runtime_refresh_within(struct cfs_bandwidth *cfs_b, u64 min_expire)
 {
 	struct hrtimer *refresh_timer = &cfs_b->period_timer;
-	u64 remaining;
+	s64 remaining;
 
 	/* if the call-back is running a quota refresh is already occurring */
 	if (hrtimer_callback_running(refresh_timer))
@@ -4588,7 +4588,7 @@ static int runtime_refresh_within(struct cfs_bandwidth *cfs_b, u64 min_expire)
 
 	/* is a quota refresh about to occur? */
 	remaining = ktime_to_ns(hrtimer_expires_remaining(refresh_timer));
-	if (remaining < min_expire)
+	if (remaining < (s64)min_expire)
 		return 1;
 
 	return 0;
@@ -4903,7 +4903,7 @@ static void walt_fixup_cumulative_runnable_avg_fair(struct rq *rq,
 	for_each_sched_entity(se) {
 		cfs_rq = cfs_rq_of(se);
 
-		cfs_rq->cumulative_runnable_avg += task_load_delta;
+		cfs_rq->walt_stats.cumulative_runnable_avg += task_load_delta;
 		if (cfs_rq_throttled(cfs_rq))
 			break;
 	}
@@ -8759,6 +8759,15 @@ redo:
 		}
 #endif /* OPLUS_FEATURE_UIFIRST */
 		load = task_h_load(p);
+		/*
+		 * Depending of the number of CPUs and tasks and the
+		 * cgroup hierarchy, task_h_load() can return a null
+		 * value. Make sure that env->imbalance decreases
+		 * otherwise detach_tasks() will stop only after
+		 * detaching up to loop_max tasks.
+		 */
+		load = max_t(unsigned long, task_h_load(p), 1);
+
 
 		if (sched_feat(LB_MIN) && load < 16 && !env->sd->nr_balance_failed)
 			goto next;

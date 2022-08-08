@@ -28,8 +28,6 @@
 #include <linux/memblock.h>
 #include <linux/fs.h>
 #include <linux/io.h>
-#include <linux/slab.h>
-#include <linux/stop_machine.h>
 #include <linux/dma-contiguous.h>
 #include <linux/cma.h>
 #include <linux/mm.h>
@@ -214,7 +212,6 @@ static void alloc_init_pmd(pud_t *pud, unsigned long addr, unsigned long end,
 		if (((addr | next | phys) & ~SECTION_MASK) == 0 &&
 		      allow_block_mappings &&
 		      !dma_overlap(phys, phys + next - addr)) {
-			pmd_t old_pmd =*pmd;
 			pmd_set_huge(pmd, phys, prot);
 
 			/*
@@ -275,7 +272,6 @@ static void alloc_init_pud(pgd_t *pgd, unsigned long addr, unsigned long end,
 		 */
 		if (use_1G_block(addr, next, phys) && allow_block_mappings &&
 		    !dma_overlap(phys, phys + next - addr)) {
-			pud_t old_pud = *pud;
 			pud_set_huge(pud, phys, prot);
 
 			/*
@@ -484,6 +480,7 @@ static void __init map_kernel_segment(pgd_t *pgd, void *va_start, void *va_end,
 #ifdef CONFIG_UNMAP_KERNEL_AT_EL0
 static int __init map_entry_trampoline(void)
 {
+	int i;
 	extern char __entry_tramp_text_start[];
 
 	pgprot_t prot = rodata_enabled ? PAGE_KERNEL_ROX : PAGE_KERNEL_EXEC;
@@ -494,11 +491,15 @@ static int __init map_entry_trampoline(void)
 
 	/* Map only the text into the trampoline page table */
 	memset(tramp_pg_dir, 0, PGD_SIZE);
-	__create_pgd_mapping(tramp_pg_dir, pa_start, TRAMP_VALIAS, PAGE_SIZE,
-			     prot, pgd_pgtable_alloc, 0);
+	__create_pgd_mapping(tramp_pg_dir, pa_start, TRAMP_VALIAS,
+			     entry_tramp_text_size(), prot, pgd_pgtable_alloc,
+			     0);
 
 	/* Map both the text and data into the kernel page table */
-	__set_fixmap(FIX_ENTRY_TRAMP_TEXT, pa_start, prot);
+	for (i = 0; i < DIV_ROUND_UP(entry_tramp_text_size(), PAGE_SIZE); i++)
+		__set_fixmap(FIX_ENTRY_TRAMP_TEXT1 - i,
+			     pa_start + i * PAGE_SIZE, prot);
+
 	if (IS_ENABLED(CONFIG_RANDOMIZE_BASE)) {
 		extern char __entry_tramp_data_start[];
 
